@@ -302,7 +302,9 @@
         - vmi_info.resources | length > 0
         - vmi_info.resources[0].status.interfaces is defined
         - vmi_info.resources[0].status.interfaces | length > 0
-      retries: 30
+        - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
+        - vmi_info.resources[0].status.interfaces[0].ipAddress | length > 0
+      retries: 60
       delay: 10
 
     - name: Wait for SSH to be available
