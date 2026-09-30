@@ -1,0 +1,300 @@
+---
+# Unattended Windows Server install on OpenShift Virtualization from an ISO.
+#
+# Boots a blank disk with the Windows ISO attached; Windows Setup reads the
+# autounattend.xml from the sysprep CD-ROM, partitions the disk (UEFI/GPT),
+# installs the chosen edition, sets the Administrator password, enables RDP
+# and installs the virtio-win guest tools on first logon.  SATA disks and an
+# e1000e NIC are used so no virtio drivers are needed during Setup.
+#
+# One-time prerequisite per namespace: a PVC holding the Windows ISO
+# (default name win2022-eval-iso).  Import it with a DataVolume, e.g.
+#   source.http.url = https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso
+- name: Create a Windows VM on OpenShift Virtualization (unattended install from ISO)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vm_namespace: vms-aap-day2
+    vm_instancetype: u1.medium
+    vm_preference: windows.2k22
+    vm_label: windows
+    vm_iso_pvc: win2022-eval-iso
+    vm_iso_size: 6Gi
+    vm_rootdisk_size: 60Gi
+    vm_storageclass: truenas-iscsi-block
+    vm_network_name: net-200
+    vm_image_index: "2"            # eval ISO: 1 Std Core, 2 Std Desktop Experience, 3 DC Core, 4 DC Desktop Experience
+    vm_admin_password: "R3dh4t1!"
+    vm_timezone: "Eastern Standard Time"
+    vm_virtio_driver_image: "registry.redhat.io/container-native-virtualization/virtio-win-rhel9@sha256:211711b009c3e942d0acb511e76388225f03010ec535fc18157943570381c4b9"
+    vm_wait_for_install: false      # true = block until the guest agent reports (20-30 min)
+    vm_computer_name: "{{ vm_name | upper | regex_replace('[^A-Z0-9-]', '-') | truncate(15, true, '') }}"
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined and vm_name | length > 0
+          - vm_image_index | string in ['1', '2', '3', '4']
+        fail_msg: "vm_name is required and vm_image_index must be 1-4"
+
+    - name: Check the Windows ISO PVC exists in {{ vm_namespace }}
+      kubernetes.core.k8s_info:
+        kind: PersistentVolumeClaim
+        namespace: "{{ vm_namespace }}"
+        name: "{{ vm_iso_pvc }}"
+      register: iso_pvc
+      failed_when: iso_pvc.resources | length == 0 or iso_pvc.resources[0].status.phase != 'Bound'
+
+    - name: Create the sysprep answer file ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "sysprep-{{ vm_name }}"
+            namespace: "{{ vm_namespace }}"
+            labels:
+              app: "{{ vm_label }}"
+              vm: "{{ vm_name }}"
+          data:
+            autounattend.xml: |
+              <?xml version="1.0" encoding="utf-8"?>
+              <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+                <settings pass="windowsPE">
+                  <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <SetupUILanguage><UILanguage>en-US</UILanguage></SetupUILanguage>
+                    <InputLocale>0409:00000409</InputLocale>
+                    <SystemLocale>en-US</SystemLocale>
+                    <UILanguage>en-US</UILanguage>
+                    <UserLocale>en-US</UserLocale>
+                  </component>
+                  <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <DiskConfiguration>
+                      <Disk wcm:action="add">
+                        <DiskID>0</DiskID>
+                        <WillWipeDisk>true</WillWipeDisk>
+                        <CreatePartitions>
+                          <CreatePartition wcm:action="add"><Order>1</Order><Type>EFI</Type><Size>260</Size></CreatePartition>
+                          <CreatePartition wcm:action="add"><Order>2</Order><Type>MSR</Type><Size>16</Size></CreatePartition>
+                          <CreatePartition wcm:action="add"><Order>3</Order><Type>Primary</Type><Extend>true</Extend></CreatePartition>
+                        </CreatePartitions>
+                        <ModifyPartitions>
+                          <ModifyPartition wcm:action="add"><Order>1</Order><PartitionID>1</PartitionID><Label>System</Label><Format>FAT32</Format></ModifyPartition>
+                          <ModifyPartition wcm:action="add"><Order>2</Order><PartitionID>2</PartitionID></ModifyPartition>
+                          <ModifyPartition wcm:action="add"><Order>3</Order><PartitionID>3</PartitionID><Label>Windows</Label><Format>NTFS</Format><Letter>C</Letter></ModifyPartition>
+                        </ModifyPartitions>
+                      </Disk>
+                    </DiskConfiguration>
+                    <ImageInstall>
+                      <OSImage>
+                        <InstallFrom>
+                          <MetaData wcm:action="add"><Key>/IMAGE/INDEX</Key><Value>{{ vm_image_index }}</Value></MetaData>
+                        </InstallFrom>
+                        <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
+                        <WillShowUI>OnError</WillShowUI>
+                      </OSImage>
+                    </ImageInstall>
+                    <UserData>
+                      <AcceptEula>true</AcceptEula>
+                      <FullName>Red Hat</FullName>
+                      <Organization>Red Hat</Organization>
+                      <ProductKey><WillShowUI>Never</WillShowUI></ProductKey>
+                    </UserData>
+                  </component>
+                </settings>
+                <settings pass="specialize">
+                  <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <ComputerName>{{ vm_computer_name }}</ComputerName>
+                    <TimeZone>{{ vm_timezone }}</TimeZone>
+                  </component>
+                  <component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <fDenyTSConnections>false</fDenyTSConnections>
+                  </component>
+                  <component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <UserAuthentication>0</UserAuthentication>
+                  </component>
+                  <component name="Networking-MPSSVC-Svc" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <FirewallGroups>
+                      <FirewallGroup wcm:action="add" wcm:keyValue="RemoteDesktop">
+                        <Active>true</Active>
+                        <Group>Remote Desktop</Group>
+                        <Profile>all</Profile>
+                      </FirewallGroup>
+                    </FirewallGroups>
+                  </component>
+                </settings>
+                <settings pass="oobeSystem">
+                  <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <InputLocale>0409:00000409</InputLocale>
+                    <SystemLocale>en-US</SystemLocale>
+                    <UILanguage>en-US</UILanguage>
+                    <UserLocale>en-US</UserLocale>
+                  </component>
+                  <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <OOBE>
+                      <HideEULAPage>true</HideEULAPage>
+                      <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                      <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                      <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                      <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                      <ProtectYourPC>3</ProtectYourPC>
+                      <SkipMachineOOBE>true</SkipMachineOOBE>
+                      <SkipUserOOBE>true</SkipUserOOBE>
+                    </OOBE>
+                    <UserAccounts>
+                      <AdministratorPassword>
+                        <Value>{{ vm_admin_password }}</Value>
+                        <PlainText>true</PlainText>
+                      </AdministratorPassword>
+                    </UserAccounts>
+                    <AutoLogon>
+                      <Password><Value>{{ vm_admin_password }}</Value><PlainText>true</PlainText></Password>
+                      <Enabled>true</Enabled>
+                      <LogonCount>1</LogonCount>
+                      <Username>Administrator</Username>
+                    </AutoLogon>
+                    <FirstLogonCommands>
+                      <SynchronousCommand wcm:action="add">
+                        <Order>1</Order>
+                        <Description>Install virtio-win guest tools (drivers + QEMU guest agent) from the driver CD</Description>
+                        <CommandLine>cmd /c for %d in (D E F G H) do if exist %d:\virtio-win-guest-tools.exe %d:\virtio-win-guest-tools.exe /S /norestart</CommandLine>
+                      </SynchronousCommand>
+                      <SynchronousCommand wcm:action="add">
+                        <Order>2</Order>
+                        <Description>Make sure RDP is enabled and allowed through the firewall</Description>
+                        <CommandLine>cmd /c reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f &amp; netsh advfirewall firewall set rule group="remote desktop" new enable=Yes</CommandLine>
+                      </SynchronousCommand>
+                      <SynchronousCommand wcm:action="add">
+                        <Order>3</Order>
+                        <Description>Allow ICMP so the VM answers ping</Description>
+                        <CommandLine>netsh advfirewall firewall add rule name="ICMPv4-In" protocol=icmpv4:8,any dir=in action=allow</CommandLine>
+                      </SynchronousCommand>
+                    </FirstLogonCommands>
+                    <TimeZone>{{ vm_timezone }}</TimeZone>
+                  </component>
+                </settings>
+              </unattend>
+
+    - name: Create the Windows VM (blank root disk + install ISO + driver CD + answer file)
+      redhat.openshift_virtualization.kubevirt_vm:
+        state: present
+        running: true
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        labels:
+          app: "{{ vm_label }}"
+          os: windows
+        instancetype:
+          name: "{{ vm_instancetype }}"
+        preference:
+          name: "{{ vm_preference }}"
+        data_volume_templates:
+          - metadata:
+              name: "{{ vm_name }}"
+            spec:
+              source:
+                blank: {}
+              storage:
+                resources:
+                  requests:
+                    storage: "{{ vm_rootdisk_size }}"
+                storageClassName: "{{ vm_storageclass }}"
+                accessModes: [ReadWriteMany]
+                volumeMode: Block
+          - metadata:
+              name: "{{ vm_name }}-install-iso"
+            spec:
+              source:
+                pvc:
+                  name: "{{ vm_iso_pvc }}"
+                  namespace: "{{ vm_namespace }}"
+              storage:
+                resources:
+                  requests:
+                    storage: "{{ vm_iso_size }}"
+                storageClassName: "{{ vm_storageclass }}"
+                accessModes: [ReadWriteMany]
+                volumeMode: Block
+        spec:
+          domain:
+            firmware:
+              bootloader:
+                efi:
+                  secureBoot: true
+            devices:
+              disks:
+                - name: rootdisk
+                  bootOrder: 1
+                  disk:
+                    bus: sata
+                - name: installation-cdrom
+                  bootOrder: 2
+                  cdrom:
+                    bus: sata
+                - name: windows-drivers-disk
+                  cdrom:
+                    bus: sata
+                - name: sysprep
+                  cdrom:
+                    bus: sata
+              inputs:
+                - name: tablet
+                  type: tablet
+                  bus: usb
+              interfaces: "{{ [{'name': 'default', 'model': 'e1000e', 'bridge': {}}] if (vm_network_name | default('')) != '' else [{'name': 'default', 'model': 'e1000e', 'masquerade': {}}] }}"
+          networks: "{{ [{'name': 'default', 'multus': {'networkName': vm_network_name}}] if (vm_network_name | default('')) != '' else [{'name': 'default', 'pod': {}}] }}"
+          terminationGracePeriodSeconds: 3600
+          volumes:
+            - name: rootdisk
+              dataVolume:
+                name: "{{ vm_name }}"
+            - name: installation-cdrom
+              dataVolume:
+                name: "{{ vm_name }}-install-iso"
+            - name: windows-drivers-disk
+              containerDisk:
+                image: "{{ vm_virtio_driver_image }}"
+            - name: sysprep
+              sysprep:
+                configMap:
+                  name: "sysprep-{{ vm_name }}"
+        wait: false
+
+    - name: Wait for the ISO clone and VM to start (up to 10 minutes)
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vmi
+      until: vmi.resources | length > 0 and vmi.resources[0].status.phase | default('') == 'Running'
+      retries: 60
+      delay: 10
+
+    - name: Windows Setup is running
+      ansible.builtin.debug:
+        msg:
+          - "VM {{ vm_name }} is booting the Windows installer in {{ vm_namespace }}."
+          - "Unattended install takes roughly 20-30 minutes; the VM reboots a few times."
+          - "Login: Administrator / {{ vm_admin_password }} (RDP enabled)."
+          - "Watch progress in the OpenShift console (Virtualization > VirtualMachines > {{ vm_name }} > Console)."
+
+    - name: Wait for the guest agent to report (install finished, virtio tools installed)
+      when: vm_wait_for_install | bool
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vmi
+      until: >-
+        (vmi.resources[0].status.conditions | default([]) | selectattr('type', 'equalto', 'AgentConnected') | selectattr('status', 'equalto', 'True') | list | length > 0)
+        and (vmi.resources[0].status.interfaces | default([]) | selectattr('ipAddress', 'defined') | list | length > 0)
+      retries: 120
+      delay: 30
+
+    - name: Report the VM address
+      when: vm_wait_for_install | bool
+      ansible.builtin.debug:
+        msg: "Windows VM {{ vm_name }} ready at {{ vmi.resources[0].status.interfaces[0].ipAddress }} (RDP, Administrator)"
