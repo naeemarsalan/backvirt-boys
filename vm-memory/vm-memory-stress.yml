@@ -1,5 +1,5 @@
 ---
-- name: Run stress-ng memory and stream stress test
+- name: Run memory stress test (stress-ng, or a python fallback when stress-ng is unavailable)
   hosts: all
   become: true
   vars:
@@ -7,18 +7,58 @@
     stress_vm: 2
     stress_vm_bytes: "90%"
     stress_timeout: "30m"
+    # "30m" -> 1800, "90s" -> 90, "600" -> 600
+    stress_timeout_seconds: >-
+      {{ (stress_timeout | string | regex_replace('m$', '') | int) * 60
+         if (stress_timeout | string) is match('^\d+m$')
+         else (stress_timeout | string | regex_replace('s$', '') | int) }}
   tasks:
-    - name: Install stress-ng if not present
-      package:
+    - name: Try to install stress-ng (needs RHEL/EPEL repos; skipped on failure)
+      ansible.builtin.package:
         name: stress-ng
         state: present
+      register: stress_pkg
+      failed_when: false
+
+    - name: Check whether stress-ng is available
+      ansible.builtin.command: which stress-ng
+      register: stress_bin
+      changed_when: false
+      failed_when: false
 
     - name: Run stress-ng
-      command: >
+      when: stress_bin.rc == 0
+      ansible.builtin.command: >
         stress-ng
         --stream {{ stress_stream }}
         --vm {{ stress_vm }}
         --vm-bytes {{ stress_vm_bytes }}
         --timeout {{ stress_timeout }}
-        --vm-keep 
+        --vm-keep
         --vm-hang 0
+      async: "{{ (stress_timeout_seconds | int) + 60 }}"
+      poll: 0
+
+    - name: Fallback - allocate and touch memory with python3 for the duration
+      when: stress_bin.rc != 0
+      ansible.builtin.shell: |
+        cat > /tmp/memhog.py <<'PY'
+        import re, time, sys
+        pct = float(sys.argv[1]) / 100.0
+        secs = int(sys.argv[2])
+        total = int(re.search(r'MemTotal:\s+(\d+)', open('/proc/meminfo').read()).group(1)) * 1024
+        size = int(total * pct)
+        buf = bytearray(size)
+        for i in range(0, size, 4096):
+            buf[i] = 1
+        time.sleep(secs)
+        PY
+        nohup python3 /tmp/memhog.py {{ stress_vm_bytes | regex_replace('%', '') }} {{ stress_timeout_seconds }} >/dev/null 2>&1 &
+        echo started
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "Memory stress running on {{ inventory_hostname }} for {{ stress_timeout_seconds }}s at {{ stress_vm_bytes }} ({{ 'stress-ng' if stress_bin.rc == 0 else 'python fallback' }})"
