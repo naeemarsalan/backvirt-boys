@@ -5,7 +5,7 @@
   vars:
     stress_stream: 2
     stress_vm: 2
-    stress_vm_bytes: "90%"
+    stress_vm_bytes: "85%"
     stress_timeout: "30m"
     # "30m" -> 1800, "90s" -> 90, "600" -> 600
     stress_timeout_seconds: >-
@@ -46,8 +46,9 @@
         import re, time, sys
         pct = float(sys.argv[1]) / 100.0
         secs = int(sys.argv[2])
-        total = int(re.search(r'MemTotal:\s+(\d+)', open('/proc/meminfo').read()).group(1)) * 1024
-        size = int(total * pct)
+        # size against MemAvailable (like stress-ng --vm-bytes N%) so the guest does not OOM-kill us
+        avail = int(re.search(r'MemAvailable:\s+(\d+)', open('/proc/meminfo').read()).group(1)) * 1024
+        size = int(avail * pct)
         buf = bytearray(size)
         for i in range(0, size, 4096):
             buf[i] = 1
