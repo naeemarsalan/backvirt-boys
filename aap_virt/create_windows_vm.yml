@@ -8,8 +8,15 @@
 # e1000e NIC are used so no virtio drivers are needed during Setup.
 #
 # One-time prerequisite per namespace: a PVC holding the Windows ISO
-# (default name win2022-eval-iso).  Import it with a DataVolume, e.g.
-#   source.http.url = https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso
+# (default name win2022-eval-iso).  The ISO MUST be remastered with
+# efisys_noprompt.bin, otherwise UEFI stops at "Press any key to boot from CD"
+# and the blank disk never installs.  Use windows-iso/remaster-noprompt.sh:
+#   curl -LO https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso
+#   aap_virt/windows-iso/remaster-noprompt.sh SERVER_EVAL_x64FRE_en-us.iso vms-aap-day2
+#
+# Operational note: never force-delete (--grace-period=0) a virt-launcher pod;
+# virt-handler keeps a stale domain entry and refuses to start a new VMI with
+# the same name on that node until it is restarted.  Use a new VM name instead.
 - name: Create a Windows VM on OpenShift Virtualization (unattended install from ISO)
   hosts: localhost
   gather_facts: false
