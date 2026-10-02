@@ -1,0 +1,66 @@
+---
+- name: Reset VM Instance Type to u1.small
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    openshift_host: "{{ lookup('ansible.builtin.env', 'K8S_AUTH_HOST', default=Undefined) | default('', True) }}"
+    openshift_api_key: "{{ lookup('ansible.builtin.env', 'K8S_AUTH_API_KEY', default=Undefined) | default('', True) }}"
+    openshift_verify_ssl: "{{ lookup('ansible.builtin.env', 'K8S_AUTH_VERIFY_SSL', default='false') | default(false) | bool }}"
+    vm_namespace: "{{ namespace | default('webhook-store') }}"
+    target_instance_type: "u1.small"
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_name != ''
+          - openshift_host != ''
+          - openshift_api_key != ''
+        fail_msg: "vm_name, K8S_AUTH_HOST, and K8S_AUTH_API_KEY must all be provided"
+
+    - name: Get current VM spec
+      redhat.openshift_virtualization.kubevirt_vm_info:
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_info
+
+    - name: Fail if VM not found
+      ansible.builtin.fail:
+        msg: "VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'"
+      when: vm_info.resources | length == 0
+
+    - name: Display current instance type
+      ansible.builtin.debug:
+        msg:
+          - "VM: {{ vm_name }} (namespace: {{ vm_namespace }})"
+          - "Current instance type: {{ vm_info.resources[0].spec.instancetype.name | default('unknown') }}"
+          - "Target instance type: {{ target_instance_type }}"
+
+    - name: Patch VM instance type
+      redhat.openshift.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        merge_type: merge
+        definition:
+          spec:
+            instancetype:
+              name: "{{ target_instance_type }}"
+              revisionName: ""
+
+    - name: Restart VM via KubeVirt subresource API
+      ansible.builtin.uri:
+        url: "{{ openshift_host }}/apis/subresources.kubevirt.io/v1/namespaces/{{ vm_namespace }}/virtualmachines/{{ vm_name }}/restart"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ openshift_api_key }}"
+        validate_certs: "{{ openshift_verify_ssl }}"
+        status_code:
+          - 202
+
+    - name: Confirm completion
+      ansible.builtin.debug:
+        msg: "VM {{ vm_name }} patched to {{ target_instance_type }} and reboot triggered."
