@@ -36,7 +36,7 @@
         vm_name_final: "{{ vm_name_approved | default(vm_name) | default('') }}"
         target_instance_type: "{{ target_instance_type_approved | default(new_instance_type) | default('') }}"
         current_instance_type: "{{ current_instance_type_approved | default('unknown') }}"
-        scaling_required: "{{ scaling_required | default(true) | bool }}"
+        vm_scaling_required: "{{ scaling_required | default(true) | bool }}"
 
     - name: Workaround - Get VM info and determine scaling plan (since approved variables not available)
       block:
@@ -83,7 +83,7 @@
 
         - name: Update scaling status
           ansible.builtin.set_fact:
-            scaling_required: "{{ target_instance_type != current_instance_type }}"
+            vm_scaling_required: "{{ target_instance_type != current_instance_type }}"
 
       when: target_instance_type == ''
 
@@ -103,14 +103,14 @@
           - "Namespace: {{ vm_namespace_final }}"
           - "Current Instance Type: {{ current_instance_type }}"
           - "Target Instance Type: {{ target_instance_type }}"
-          - "Scaling Required: {{ scaling_required }}"
+          - "Scaling Required: {{ vm_scaling_required }}"
           - "Variables Source: {{ 'Approved (from Request Job)' if vm_name_approved is defined else 'Direct (Workaround)' }}"
           - "Starting scaling operation..."
 
     - name: Skip scaling if no change needed
       ansible.builtin.debug:
         msg: "VM {{ vm_name_final }} is already at the target instance type {{ current_instance_type }}. No scaling needed."
-      when: not scaling_required
+      when: not vm_scaling_required
 
     # Perform the actual VM scaling using hot plug pattern
     - name: Execute approved VM instance type scaling
@@ -202,7 +202,7 @@
               Please check the VM status and OpenShift cluster resources.
               Error details: {{ ansible_failed_result.msg | default('Unknown error occurred') }}
 
-      when: scaling_required
+      when: vm_scaling_required
 
     # Final summary
     - name: Display final operation summary
@@ -211,6 +211,6 @@
           - "========== VM SCALING OPERATION SUMMARY =========="
           - "VM Name: {{ vm_name_final }}"
           - "Namespace: {{ vm_namespace_final }}"
-          - "Operation: {{ 'Completed Successfully' if scaling_required else 'No Action Required' }}"
-          - "Instance Type: {{ current_instance_type }} → {{ target_instance_type if scaling_required else current_instance_type }}"
+          - "Operation: {{ 'Completed Successfully' if vm_scaling_required else 'No Action Required' }}"
+          - "Instance Type: {{ current_instance_type }} → {{ target_instance_type if vm_scaling_required else current_instance_type }}"
           - "Timestamp: {{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"

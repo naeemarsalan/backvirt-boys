@@ -87,6 +87,12 @@
         verify_ssl: "{{ openshift_verify_ssl }}"
       register: cluster_instance_types
 
+    # A size pinned on the workflow node or survey goes stale once the VM reaches it
+    - name: Ignore requested instance type when VM is already at that size
+      ansible.builtin.set_fact:
+        new_instance_type_final: ''
+      when: new_instance_type_final == current_instance_type
+
     # Determine next instance size
     - name: Determine next instance type if not provided
       ansible.builtin.set_fact:
